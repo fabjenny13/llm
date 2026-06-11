@@ -4,6 +4,16 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
 
+GPT_CONFIG_124M = {
+    "vocab_size": 50257,
+    "context_length": 1024,
+    "emb_dim": 768,
+    "n_heads": 12,
+    "n_layers": 12,
+    "drop_rate": 0.1,
+    "qkv_bias": False
+}
+
 class GPTDatasetV1(Dataset):
     def __init__(self, txt, tokenizer, max_length, stride):
         self.input_ids = []
@@ -95,3 +105,108 @@ class MultiHeadAttention(nn.Module):
         context_vec = self.out_proj(context_vec)  # optional projection
 
         return context_vec
+    
+
+
+class LayerNorm(nn.Module):
+    def __init__(self, out_dim):
+        super().__init__()
+        self.eps = 1e-5
+        self.scale = nn.Parameter(torch.ones(out_dim))
+        self.shift = nn.Parameter(torch.zeros(out_dim))
+
+    def forward(self, x):
+        mean = x.mean(dim=-1, keepdim = True)
+        var = x.var(dim=-1, keepdim = True, unbiased = False)
+        x_norm = (x - mean) / torch.sqrt(var + self.eps)
+
+        return self.scale * x_norm + self.shift
+    
+
+class GELU(nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self,x):
+        return 0.5 * x * (1 + torch.tanh(
+            torch.sqrt(torch.tensor(2.0/torch.pi)) *
+            (x + 0.044715 * torch.pow(x, 3))
+            ))
+    
+
+class FeedForward(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(cfg["emb_dim"], 4*cfg["emb_dim"]),
+            GELU(),
+            nn.Linear(4 * cfg["emb_dim"], cfg["emb_dim"]),
+        )
+
+    def forward(self, x):
+        return self.layers(x)
+    
+class TransformerBlock(nn.Module):
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.layer_norm1 = LayerNorm(cfg["emb_dim"])
+        self.layer_norm2 = LayerNorm(cfg["emb_dim"])
+        self.mha = MultiHeadAttention(cfg["emb_dim"], cfg["emb_dim"], cfg["context_length"], cfg["drop_rate"], cfg["n_heads"], cfg["qkv_bias"])
+        self.dropout = nn.Dropout(cfg["drop_rate"])
+        self.feed_forward = FeedForward(cfg)
+
+    def forward(self, x):
+        shortcut = x
+        x = self.layer_norm1(x)
+        x = self.mha(x)
+        x = self.dropout(x)
+        x = x + shortcut
+
+        x = self.layer_norm2(x)
+        x = self.feed_forward(x)
+        x = self.dropout(x)
+        x = x + shortcut
+
+        return x
+
+
+class GPTModel(nn.Module):
+    
+    def __init__(self, cfg):
+        super().__init__()
+        self.token_embedding_layer = nn.Embedding(cfg["vocab_size"], cfg["emb_dim"])
+        self.pos_embedding_layer = nn.Embedding(cfg["context_length"], cfg["emb_dim"])
+        self.dropout_layer = nn.Dropout(cfg["drop_rate"])
+        self.trans_blocks = nn.Sequential(*[TransformerBlock(cfg) for _ in range(cfg["n_layers"])])
+        self.layer_norm = LayerNorm(cfg["emb_dim"])
+        self.out_head = nn.Linear(in_features=cfg["emb_dim"], out_features=cfg["vocab_size"], bias=False)
+
+
+    def forward(self, x):
+        batch_size, seq_len = x.shape
+        token_embeddings = self.token_embedding_layer(x)
+        pos_embeddings = self.pos_embedding_layer(torch.arange(seq_len, device=x.device))
+        input = token_embeddings + pos_embeddings
+
+        out = self.dropout_layer(input)
+        out = self.trans_blocks(out)
+        out = self.layer_norm(out)
+        logits = self.out_head(out)
+
+        return logits
+    
+    
+def generate_text(model, tokens, context_length, max_tokens):
+    ind = tokens[:, -context_length:]
+
+    for _ in range(max_tokens):
+        tokens = ind[:, -context_length:]
+        with torch.no_grad():
+            out = model(tokens)
+    
+        logits = out[:, -1, :]
+        max_ind = torch.argmax(logits, dim=-1, keepdim=True)
+        ind = torch.cat((tokens, max_ind), dim=1)
+
+    return ind
