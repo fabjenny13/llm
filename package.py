@@ -6,7 +6,7 @@ from torch.utils.data import Dataset, DataLoader
 
 GPT_CONFIG_124M = {
     "vocab_size": 50257,
-    "context_length": 1024,
+    "context_length": 256,
     "emb_dim": 768,
     "n_heads": 12,
     "n_layers": 12,
@@ -196,7 +196,7 @@ class GPTModel(nn.Module):
 
         return logits
     
-    
+
 def generate_text(model, tokens, context_length, max_tokens):
     ind = tokens[:, -context_length:]
 
